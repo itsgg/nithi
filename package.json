@@ -1,0 +1,51 @@
+{
+  "name": "nithi",
+  "version": "0.1.0",
+  "description": "Ask Nithyananda from your terminal: streaming answers, sessions, file attachments, and a beautiful markdown renderer.",
+  "type": "module",
+  "bin": {
+    "nithi": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "node src/cli.ts",
+    "start": "node dist/cli.js",
+    "prepublishOnly": "npm run build",
+    "postinstall-note": "Run: npx playwright install chromium"
+  },
+  "keywords": [
+    "cli",
+    "terminal",
+    "chat",
+    "llm",
+    "ai",
+    "markdown",
+    "streaming",
+    "nithyananda"
+  ],
+  "author": "itsgg <me@itsgg.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/itsgg/nithi.git"
+  },
+  "homepage": "https://github.com/itsgg/nithi#readme",
+  "bugs": {
+    "url": "https://github.com/itsgg/nithi/issues"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
