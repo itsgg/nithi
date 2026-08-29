@@ -18,8 +18,9 @@
     "build": "tsc",
     "dev": "node src/cli.ts",
     "start": "node dist/cli.js",
-    "prepublishOnly": "npm run build",
-    "postinstall-note": "Run: npx playwright install chromium"
+    "test": "tsc -p tsconfig.test.json && node --test \".test-build/test/*.test.js\"",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "cli",
