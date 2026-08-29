@@ -92,6 +92,10 @@ nithi status | stop | serve        # manage the background daemon
 nithi doctor                       # check install, browser, cache, network
 ```
 
+Commands that don't need a browser (`--help`, `--version`, `--list`, `export`,
+`completions`, `status`) return in about 200ms: Playwright is imported only on
+the paths that actually launch Chromium.
+
 ### Options
 
 | Flag | Meaning |
@@ -154,6 +158,8 @@ asks about the words rather than parsing them.
 | `NITHI_NO_DAEMON=1` | Don't use the background daemon (direct browser each call) |
 | `NITHI_IDLE_MIN=15` | Minutes the idle daemon stays warm |
 | `NITHI_TIMEOUT_MS=130000` | Default answer timeout (`--timeout` overrides it) |
+| `NITHI_NAV_TIMEOUT_MS=30000` | How long one attempt at opening the site may take |
+| `NITHI_NAV_ATTEMPTS=3` | How many times to try opening it before giving up |
 | `NITHI_HOME=~/.cache/nithi` | Where sessions, cookies and the socket live |
 
 ## How it works
@@ -183,6 +189,23 @@ and removed.
 If the page, context or browser dies, the next question relaunches the browser
 and retries once rather than failing forever. A stale Cloudflare clearance is
 recovered the same way: reload, re-solve, ask again.
+
+Opening the site is the one step that depends on someone else's network, so it
+is retried with backoff rather than being fatal on the first slow load. A
+`goto` timeout is also not taken at face value: `waitUntil` resolves on a
+lifecycle event, so a slow subresource can blow the deadline while the document
+is already there and perfectly able to issue the same-origin fetch that is all
+nithi needs. Each failure is checked against that requirement before it counts
+as one, and when nithi does start on a page whose load never completed it says
+so on stderr (in the journal, for the daemon).
+
+Because the daemon binds its socket before it starts the browser, a question
+asked during a cold start queues rather than failing. The client's timeout is an
+*inactivity* deadline rather than a total one: the daemon sends a keep-alive to
+every waiting question while the browser warms up, and an answer that streams
+for a long time is not cut off mid-sentence. Readiness itself still has a
+deadline, so a browser that hangs on startup reports that instead of leaving
+callers waiting.
 
 ### Running it as a service
 

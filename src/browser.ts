@@ -1,11 +1,32 @@
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+// Type-only: importing playwright for real costs about two seconds, and most
+// nithi invocations (--help, --list, export, completions, status) never launch a
+// browser at all. The runtime import is deferred into start().
+import type { Browser, BrowserContext, Page } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DIR_MODE, STATE_FILE } from "./paths.js";
 import { parseRun } from "./protocol.js";
 
 const BASE = "https://ask.nithyananda.ai/";
+const ORIGIN = "https://ask.nithyananda.ai";
 const API = "https://ask.nithyananda.ai/v1/agents/ngpt-v4/runs";
+
+// Opening the site is the one step that depends on someone else's network. A
+// single slow load used to kill the daemon outright, so it gets a few tries.
+// The whole budget (attempts, timeouts and backoff) stays inside the client's
+// own ask timeout, so a cold start is something a waiting question survives
+// rather than something it gives up on.
+/** A positive number from the environment, or the default for anything else. */
+export const positiveEnv = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const NAV_TIMEOUT_MS = positiveEnv("NITHI_NAV_TIMEOUT_MS", 30_000);
+const NAV_ATTEMPTS = Math.floor(positiveEnv("NITHI_NAV_ATTEMPTS", 3));
+const NAV_BACKOFF_MS = [2_000, 5_000];
 const UA =
   "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Mobile Safari/537.36";
 
@@ -96,6 +117,53 @@ export class DeltaRouter {
   }
 }
 
+export interface Navigation {
+  /** Navigate to the site. Rejects on timeout. */
+  goto: () => Promise<void>;
+  /** Can we run a same-origin fetch from the page as it stands? */
+  usable: () => Promise<boolean>;
+  sleep: (ms: number) => Promise<void>;
+  attempts?: number;
+  backoffMs?: (attempt: number) => number;
+  /** Errors that mean "stop now", rather than "try again". */
+  fatal?: (e: unknown) => boolean;
+}
+
+/**
+ * Open the site, tolerating a slow first load.
+ *
+ * A `goto` timeout does not mean the page is unusable: waitUntil resolves on a
+ * lifecycle event, so a slow subresource or a redirect chain can blow the
+ * deadline while the document is already there and perfectly able to issue the
+ * same-origin fetch that is all this program needs. So every failure is checked
+ * against what we actually require before it is treated as one, and only a page
+ * that is genuinely unreachable after several tries is fatal.
+ */
+export async function openSite(nav: Navigation): Promise<"navigated" | "usable" > {
+  const attempts = Math.max(1, Math.floor(nav.attempts ?? NAV_ATTEMPTS));
+  const backoff = nav.backoffMs ?? ((i: number) => NAV_BACKOFF_MS[i] ?? NAV_BACKOFF_MS.at(-1)!);
+  let last: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await nav.goto();
+      return "navigated";
+    } catch (e) {
+      // Some failures are not worth retrying: by the time we got here the page
+      // may belong to a different question entirely.
+      if (nav.fatal?.(e)) throw e;
+      last = e;
+      // A usability check that cannot run is not evidence of a usable page, but
+      // it is no reason to stop trying to open one either.
+      const usable = await nav.usable().catch(() => false);
+      if (usable) return "usable";
+      if (i < attempts - 1) await nav.sleep(backoff(i));
+    }
+  }
+  const why = (last as Error)?.message ?? String(last);
+  const tries = attempts === 1 ? "1 attempt" : `${attempts} attempts`;
+  throw new Error(`could not open ${BASE} after ${tries}: ${why}`);
+}
+
 /** Raised when a question is abandoned before it finished (the ask timed out). */
 export class SupersededError extends Error {
   constructor() {
@@ -111,6 +179,7 @@ export class Nithi implements Engine {
   private lastPersist = 0;
 
   async start(): Promise<void> {
+    const { chromium } = await import("playwright");
     this.browser = await chromium.launch({ headless: HEADLESS() });
     this.context = await this.browser.newContext({
       userAgent: UA,
@@ -130,8 +199,55 @@ export class Nithi implements Engine {
     await this.page.exposeFunction("__nithiDelta", (token: number, chunk: string) =>
       this.router.route(token, chunk),
     );
-    await this.page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const how = await this.open(this.page);
+    if (how === "usable") {
+      // Worth saying out loud: the load never finished, we are going ahead on a
+      // page that can still talk to the API. In the daemon this lands in the
+      // journal, which is where you look when answers start coming back slowly.
+      process.stderr.write("nithi: site load did not complete; continuing on a usable page\n");
+    }
     await this.persist(true);
+  }
+
+  /**
+   * Navigate to the site, with the retry policy above.
+   *
+   * Bound to one page, and re-checked before every attempt. Retrying takes
+   * seconds, long enough for the daemon to abandon this question and hand the
+   * browser to the next one; without the check, a retry from a question nobody
+   * is waiting for would navigate the page that replaced it.
+   */
+  private open(page: Page): Promise<"navigated" | "usable"> {
+    return openSite({
+      goto: async () => {
+        if (page !== this.page) throw new SupersededError();
+        await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT_MS });
+      },
+      usable: () => (page === this.page ? this.pageUsable() : Promise.resolve(false)),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      fatal: (e) => e instanceof SupersededError,
+    });
+  }
+
+  /**
+   * Is the page able to do the only thing we ask of it: a same-origin fetch?
+   *
+   * That means being on the site's origin with a live execution context. A
+   * Cloudflare interstitial satisfies both, and deliberately counts as usable:
+   * askStream already reloads and re-solves a challenge when a question comes
+   * back 403, so refusing to start would be failing over a case that is already
+   * handled a layer down.
+   */
+  private async pageUsable(): Promise<boolean> {
+    try {
+      if (!this.page || this.page.isClosed()) return false;
+      // An origin comparison, not a prefix match: "ask.nithyananda.ai.example"
+      // and "ask.nithyananda.ai@example" both start with the origin string.
+      if (new URL(this.page.url()).origin !== ORIGIN) return false;
+      return await this.page.evaluate(() => typeof fetch === "function");
+    } catch {
+      return false;
+    }
   }
 
   /** True while the browser, context and page are all still usable. */
@@ -233,7 +349,10 @@ export class Nithi implements Engine {
       if (challenged && !attempt.challenged && !emitted) {
         attempt.challenged = true;
         const page = this.page!;
-        await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+        // Same policy as startup: a slow reload is not a reason to give up on a
+        // clearance that a second attempt usually refreshes. Bound to this page,
+        // so an abandoned retry cannot navigate its replacement.
+        await this.open(page).catch(() => {});
         // Re-solving the challenge takes seconds, long enough for this question
         // to be abandoned and the page to be handed to another one. Bail rather
         // than reload and re-ask on a page that is no longer ours.

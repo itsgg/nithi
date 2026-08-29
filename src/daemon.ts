@@ -150,14 +150,24 @@ export function daemonAsk(
       sock.destroy();
       fn();
     };
-    const timer = setTimeout(() => end(() => reject(new Error("daemon timeout"))), timeoutMs);
+    // An inactivity deadline, not a total one. The daemon may still be warming
+    // its browser, and an answer may legitimately stream for longer than this;
+    // what we are actually watching for is the conversation going silent.
+    let timer = setTimeout(() => end(() => reject(new Error("daemon timeout"))), timeoutMs);
+    const keepAlive = () => {
+      if (done) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => end(() => reject(new Error("daemon timeout"))), timeoutMs);
+    };
     const read = createLineReader((line) => {
+      keepAlive();
       let m: { t?: string; d?: string; content?: string; sessionId?: string; error?: string };
       try {
         m = JSON.parse(line);
       } catch {
         return;
       }
+      if (m.t === "wait") return; // the daemon is still getting ready
       if (m.t === "d") onDelta(m.d ?? "");
       else if (m.t === "done") end(() => resolve({ content: m.content ?? "", sessionId: m.sessionId }));
       else if (m.t === "err") end(() => reject(new Error(m.error || "daemon error")));
@@ -204,6 +214,10 @@ export interface DaemonOptions {
   idleMs?: number;
   /** Give up on a single question after this long (0 disables). */
   askTimeoutMs?: number;
+  /** How often to reassure a waiting client while the engine starts. */
+  waitHeartbeatMs?: number;
+  /** How long a question may wait for the engine to become ready (0 disables). */
+  readyTimeoutMs?: number;
   /** Install SIGINT/SIGTERM handlers (off in tests). */
   handleSignals?: boolean;
   log?: (msg: string) => void;
@@ -242,6 +256,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   // Slightly beyond the client's own patience, so a normal client timeout is
   // the one the user sees, and this only catches a genuinely stuck engine.
   const askTimeoutMs = opts.askTimeoutMs ?? DEFAULT_TIMEOUT_MS + 30_000;
+  // Comfortably inside any sane client deadline, so a client waiting on a slow
+  // browser startup never sees a silence long enough to give up on.
+  const waitHeartbeatMs = opts.waitHeartbeatMs ?? 10_000;
+  // The heartbeat suppresses the client's own deadline, so readiness needs one
+  // of its own: otherwise a browser that hangs while starting would leave a
+  // client being reassured forever.
+  const readyTimeoutMs = opts.readyTimeoutMs ?? 3 * 60_000;
   const log = opts.log ?? (() => {});
 
   mkdirSync(CACHE, { recursive: true, mode: DIR_MODE });
@@ -411,11 +432,29 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
       if (req.op === "ask" && typeof req.message === "string" && req.message) {
         inFlight++;
+        // Reassure the client while the browser warms up, so its inactivity
+        // deadline measures the answer rather than the startup. This is set up
+        // as the request arrives, not inside the queue: questions behind the
+        // first one are still waiting on the same startup, and would otherwise
+        // sit in silence until they gave up.
+        let beat: NodeJS.Timeout | undefined;
+        const stopBeat = () => {
+          if (beat) clearInterval(beat);
+          beat = undefined;
+        };
+        if (readyState === "pending") {
+          writeLine(sock, { t: "wait" });
+          beat = setInterval(() => {
+            if (gone || readyState !== "pending") return stopBeat();
+            writeLine(sock, { t: "wait" });
+          }, waitHeartbeatMs);
+          beat.unref?.();
+        }
         queue = queue.then(async () => {
           let timedOut = false;
           try {
             if (gone) return; // the client left while this was queued
-            await ready;
+            await withTimeout(ready, readyTimeoutMs, "the browser never finished starting");
             if (gone) return;
             // A stalled answer must not hold the queue (and inFlight, which
             // gates the idle timer) for the life of the process.
@@ -441,6 +480,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
               });
             }
           } finally {
+            stopBeat();
             inFlight--;
             lastActivity = Date.now();
           }

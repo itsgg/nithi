@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-const { isDeadTarget, DeltaRouter } = await import("../src/browser.js");
+const { isDeadTarget, DeltaRouter, openSite } = await import("../src/browser.js");
 
 // These are Playwright's own wordings. Matching them is what lets the daemon
 // relaunch a dead browser instead of failing every later question.
@@ -115,4 +115,174 @@ test("isCurrent distinguishes the live question from an abandoned one", () => {
   assert.equal(r.isCurrent(b), true);
   r.invalidate();
   assert.equal(r.isCurrent(b), false, "a relaunch must invalidate the question in flight");
+});
+
+// --- opening the site -------------------------------------------------------
+// The one step that depends on someone else's network. A single slow load used
+// to kill the daemon outright.
+
+const noSleep = async () => {};
+
+test("a page that opens first time needs no retry", async () => {
+  let gotos = 0;
+  const r = await openSite({
+    goto: async () => void gotos++,
+    usable: async () => true,
+    sleep: noSleep,
+  });
+  assert.equal(r, "navigated");
+  assert.equal(gotos, 1);
+});
+
+test("a slow load is retried rather than being fatal", async () => {
+  let gotos = 0;
+  const r = await openSite({
+    goto: async () => {
+      if (++gotos < 3) throw new Error("page.goto: Timeout 30000ms exceeded");
+    },
+    usable: async () => false,
+    sleep: noSleep,
+  });
+  assert.equal(r, "navigated");
+  assert.equal(gotos, 3);
+});
+
+// waitUntil resolves on a lifecycle event, so a slow subresource can blow the
+// deadline while the document is already able to issue a same-origin fetch.
+test("a timeout that still left a usable page is accepted, not retried", async () => {
+  let gotos = 0;
+  const r = await openSite({
+    goto: async () => {
+      gotos++;
+      throw new Error("page.goto: Timeout 30000ms exceeded");
+    },
+    usable: async () => true,
+    sleep: noSleep,
+  });
+  assert.equal(r, "usable");
+  assert.equal(gotos, 1, "a usable page should not be navigated again");
+});
+
+test("a page that is truly unreachable fails, and says why", async () => {
+  let gotos = 0;
+  await assert.rejects(
+    openSite({
+      goto: async () => {
+        gotos++;
+        throw new Error("net::ERR_NAME_NOT_RESOLVED");
+      },
+      usable: async () => false,
+      sleep: noSleep,
+      attempts: 3,
+    }),
+    /could not open .* after 3 attempts: net::ERR_NAME_NOT_RESOLVED/,
+  );
+  assert.equal(gotos, 3);
+});
+
+test("it backs off between attempts, and not after the last one", async () => {
+  const waits: number[] = [];
+  await assert.rejects(
+    openSite({
+      goto: async () => {
+        throw new Error("nope");
+      },
+      usable: async () => false,
+      sleep: async (ms) => void waits.push(ms),
+      attempts: 3,
+      backoffMs: (i) => (i + 1) * 100,
+    }),
+  );
+  assert.deepEqual(waits, [100, 200], "backoff should happen between attempts only");
+});
+
+test("a usability check that throws neither stops the retries nor hides the real error", async () => {
+  let gotos = 0;
+  await assert.rejects(
+    openSite({
+      goto: async () => {
+        gotos++;
+        throw new Error("the real problem");
+      },
+      usable: async () => {
+        throw new Error("checking failed too");
+      },
+      sleep: noSleep,
+      attempts: 3,
+    }),
+    /could not open .* the real problem/,
+  );
+  assert.equal(gotos, 3, "a failing usability check cut the retries short");
+});
+
+test("attempts is floored at one, and said in the singular", async () => {
+  let gotos = 0;
+  await assert.rejects(
+    openSite({
+      goto: async () => {
+        gotos++;
+        throw new Error("nope");
+      },
+      usable: async () => false,
+      sleep: noSleep,
+      attempts: 0,
+    }),
+    /after 1 attempt: nope/,
+  );
+  assert.equal(gotos, 1);
+});
+
+test("navigation knobs fall back to the default for anything that is not a positive number", async () => {
+  const { positiveEnv } = await import("../src/browser.js");
+  const key = "NITHI_TEST_KNOB";
+  const cases: [string | undefined, number][] = [
+    [undefined, 7],
+    ["", 7],
+    ["0", 7],
+    ["-5", 7],
+    ["abc", 7],
+    ["NaN", 7],
+    ["Infinity", 7],
+    ["12", 12],
+    ["1.5", 1.5],
+  ];
+  for (const [value, expected] of cases) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+    assert.equal(positiveEnv(key, 7), expected, `for ${JSON.stringify(value)}`);
+  }
+  delete process.env[key];
+});
+
+// Importing playwright costs about two seconds, and most nithi invocations
+// (--help, --list, export, completions, status) never launch a browser. The
+// import must therefore stay dynamic, inside start().
+test("playwright is not imported until a browser is actually needed", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { dirname, join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const compiled = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "browser.js"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    compiled,
+    /^\s*import\s[^;]*["']playwright["']/m,
+    "browser.js has a static import of playwright; it must be dynamic",
+  );
+  assert.match(compiled, /await import\(["']playwright["']\)/, "the dynamic import is missing");
+});
+
+test("the CLI starts fast enough that it clearly did not load playwright", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { dirname, join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.js");
+  const started = Date.now();
+  const r = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8" });
+  const elapsed = Date.now() - started;
+  assert.equal(r.status, 0);
+  // Loading playwright alone takes roughly two seconds; a generous ceiling that
+  // still fails loudly if the static import ever comes back.
+  assert.ok(elapsed < 1500, `nithi --version took ${elapsed}ms`);
 });

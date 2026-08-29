@@ -35,10 +35,16 @@ class FakeEngine implements Engine {
     return { content: m.toUpperCase(), sessionId: "sid-1" };
   };
   startDelayMs = 0;
+  startHangs = false;
   startError?: Error;
 
   async start() {
-    if (this.startDelayMs) await new Promise((r) => setTimeout(r, this.startDelayMs));
+    if (this.startHangs) await new Promise(() => {}); // never settles, and holds no timer
+    if (this.startDelayMs)
+      await new Promise((r) => {
+        // unref'd: a pending startup must not hold the test run open
+        setTimeout(r, this.startDelayMs).unref?.();
+      });
     if (this.startError) throw this.startError;
     this.started++;
   }
@@ -677,4 +683,173 @@ test("a daemon survives an engine with no recover() at all", async () => {
   await assert.rejects(daemonAsk({ op: "ask", message: "hangs" }, () => {}, 5000, sock), /too long/);
   assert.equal((await daemonAsk({ op: "ask", message: "next" }, () => {}, 5000, sock)).content, "next");
   await d.stop();
+});
+
+// --- the client deadline measures silence, not elapsed time -----------------
+
+test("a slow startup does not eat the answer's deadline", async () => {
+  const sock = sockFor("keepalive");
+  const engine = new FakeEngine();
+  // startup takes more than twice the client's whole deadline
+  engine.startDelayMs = 700;
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("keepalive"),
+    waitHeartbeatMs: 50,
+    handleSignals: false,
+  });
+  try {
+    // The client still gets its answer, because the daemon keeps saying it is
+    // alive and the deadline measures silence rather than elapsed time.
+    const r = await daemonAsk({ op: "ask", message: "patient" }, () => {}, 300, sock);
+    assert.equal(r.content, "PATIENT");
+  } finally {
+    await d.stop();
+  }
+});
+
+test("a client still gives up if the daemon never finishes starting", async () => {
+  const sock = sockFor("neverready");
+  const engine = new FakeEngine();
+  // Long enough that no heartbeat can arrive before the client's deadline,
+  // short enough not to hold the test run open.
+  engine.startDelayMs = 1_500;
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("neverready"),
+    waitHeartbeatMs: 10_000, // no reassurance will arrive in time
+    handleSignals: false,
+  });
+  try {
+    await assert.rejects(
+      daemonAsk({ op: "ask", message: "q" }, () => {}, 200, sock),
+      /daemon timeout/,
+    );
+  } finally {
+    await d.stop();
+  }
+});
+
+test("an answer that streams for longer than the timeout is not cut off", async () => {
+  const sock = sockFor("longstream");
+  const engine = new FakeEngine();
+  engine.behaviour = async (_m, emit) => {
+    for (let i = 0; i < 8; i++) {
+      await new Promise((r) => setTimeout(r, 60));
+      emit(`chunk${i} `);
+    }
+    return { content: "done" };
+  };
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("longstream"),
+    handleSignals: false,
+  });
+  await d.ready;
+  const got: string[] = [];
+  // total stream time (~480ms) far exceeds the 200ms deadline, but no single
+  // gap does, so it must survive
+  const r = await daemonAsk({ op: "ask", message: "q" }, (p) => got.push(p), 200, sock);
+  assert.equal(got.length, 8);
+  assert.equal(r.content, "done");
+  await d.stop();
+});
+
+test("a daemon that truly goes silent still times the client out", async () => {
+  const sock = sockFor("silence");
+  const engine = new FakeEngine();
+  engine.behaviour = () => new Promise(() => {}); // never emits, never settles
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("silence"),
+    askTimeoutMs: 10_000,
+    handleSignals: false,
+  });
+  await d.ready;
+  await assert.rejects(
+    daemonAsk({ op: "ask", message: "q" }, () => {}, 250, sock),
+    /daemon timeout/,
+  );
+  await d.stop();
+});
+
+test("a browser that hangs while starting does not keep a client waiting forever", async () => {
+  const sock = sockFor("neverstarts");
+  const engine = new FakeEngine();
+  engine.startHangs = true;
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("neverstarts"),
+    waitHeartbeatMs: 20, // reassurance arrives constantly...
+    readyTimeoutMs: 150, // ...but readiness has a deadline of its own
+    handleSignals: false,
+  });
+  try {
+    await assert.rejects(
+      daemonAsk({ op: "ask", message: "q" }, () => {}, 5000, sock),
+      /never finished starting/,
+    );
+  } finally {
+    await d.stop();
+  }
+});
+
+test("every question waiting on startup is reassured, not just the first", async () => {
+  const sock = sockFor("queuedbeat");
+  const engine = new FakeEngine();
+  engine.startDelayMs = 800;
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("queuedbeat"),
+    waitHeartbeatMs: 40,
+    handleSignals: false,
+  });
+  try {
+    // Three questions arrive while the browser is still starting. They queue
+    // behind one another, and every one of their deadlines is shorter than the
+    // startup, so all three depend on being kept alive.
+    const answers = await Promise.all(
+      ["one", "two", "three"].map((m) =>
+        daemonAsk({ op: "ask", message: m }, () => {}, 300, sock),
+      ),
+    );
+    assert.deepEqual(
+      answers.map((a) => a.content),
+      ["ONE", "TWO", "THREE"],
+    );
+  } finally {
+    await d.stop();
+  }
+});
+
+test("the startup heartbeat stops once the client is gone", async () => {
+  const sock = sockFor("beatstop");
+  const engine = new FakeEngine();
+  engine.startDelayMs = 400;
+  const d = await startDaemon({
+    engine,
+    sockPath: sock,
+    pidPath: pidFor("beatstop"),
+    waitHeartbeatMs: 20,
+    handleSignals: false,
+  });
+  try {
+    const doomed = net.connect(sock);
+    await new Promise((r) => doomed.on("connect", r));
+    doomed.write(JSON.stringify({ op: "ask", message: "abandoned" }) + "\n");
+    await new Promise((r) => setTimeout(r, 60));
+    doomed.destroy();
+    // the daemon must still come up and serve the next question normally
+    const r = await daemonAsk({ op: "ask", message: "after" }, () => {}, 3000, sock);
+    assert.equal(r.content, "AFTER");
+    assert.deepEqual(engine.asks.map((x) => x.message), ["after"]);
+  } finally {
+    await d.stop();
+  }
 });
