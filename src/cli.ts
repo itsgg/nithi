@@ -17,8 +17,8 @@ import { spawn } from "node:child_process";
 
 import { parseArgs, UsageError, type Opts } from "./args.js";
 import { CACHE, DIR_MODE, DLOG, DPID, FILE_MODE, SESS_DIR, SOCK, STATE_FILE } from "./paths.js";
-import { ESC, T, bold, cols, dim, setPlain } from "./theme.js";
-import { reconcileTail, render, safeCut } from "./render.js";
+import { ESC, T, bold, cols, dim, promptMark, setPlain } from "./theme.js";
+import { reconcileTail, render, safeCut, turnRule } from "./render.js";
 import { buildMessage, extractAtFiles } from "./protocol.js";
 import {
   exportSessionMarkdown,
@@ -32,6 +32,11 @@ import {
   type Session,
 } from "./session.js";
 import { Nithi, type Answer } from "./browser.js";
+
+/** An answer, plus the turn number it was recorded as when there was a session. */
+interface Recorded extends Answer {
+  turn?: number;
+}
 import { clipboardCopy, editorCompose } from "./system.js";
 import {
   DEFAULT_TIMEOUT_MS,
@@ -76,11 +81,19 @@ function spinner(label = "thinking") {
  * append-only so nothing on screen is ever rewritten (no flicker), and shows a
  * dim single-line ticker of the in-progress block below them.
  */
-function streamRender() {
+function streamRender(label?: string) {
   const ticker = !OPTS.quiet && !OPTS.json && process.stderr.isTTY;
   let buf = "";
   let printed = 0;
   let streamed = ""; // every delta received, to reconcile against the final text
+  // Printed once, immediately above the first block of the answer, so the reply
+  // is marked by something it has rather than by the absence of a prompt.
+  let labelled = false;
+  const speaker = () => {
+    if (labelled || !label) return;
+    labelled = true;
+    process.stdout.write("\n" + T.tag(label) + "\n");
+  };
   const clearTicker = () => {
     if (ticker) process.stderr.write("\r" + ESC + "2K");
   };
@@ -99,7 +112,10 @@ function streamRender() {
       buf = buf.slice(cut);
       if (out) {
         clearTicker();
-        process.stdout.write("\n" + out + "\n");
+        speaker();
+        // The label supplies the blank line above the first block; every later
+        // block needs its own, or the answer's paragraphs and rules run together.
+        process.stdout.write((printed === 0 && label ? "" : "\n") + out + "\n");
         printed++;
       }
       if (final) break;
@@ -120,7 +136,14 @@ function streamRender() {
       // No deltas streamed (some responses only carry the final): print it once.
       // Otherwise top up whatever the stream stopped short of.
       const tail = printed === 0 ? (content ?? "").trim() : reconcileTail(streamed, content);
-      if (tail.trim()) process.stdout.write("\n" + render(tail) + "\n");
+      // Render first, then decide: an answer that is only an empty code fence is
+      // non-empty text that renders to nothing, and would otherwise leave a
+      // speaker label standing over no answer at all.
+      const out = tail.trim() ? render(tail) : "";
+      if (out) {
+        speaker();
+        process.stdout.write((printed === 0 && label ? "" : "\n") + out + "\n");
+      }
     },
     stop() {
       clearTicker();
@@ -235,8 +258,9 @@ async function askAndRecord(
   session: Session | null,
   question: string,
   files: string[],
-): Promise<Answer> {
-  const sr = streamRender();
+  label?: string,
+): Promise<Recorded> {
+  const sr = streamRender(label);
   try {
     const useSession = session && !OPTS.fresh ? session.sessionId : undefined;
     const system = OPTS.system ?? session?.system;
@@ -253,14 +277,16 @@ async function askAndRecord(
       // so it is authoritative: appending to it, rather than to the copy this
       // process has been holding, is what stops a concurrent turn being lost or
       // a turn another process just dropped being written back.
-      Object.assign(
-        session,
-        updateSession(session.name, (s) => {
-          s.turns.push(turn);
-          if (answer.sessionId) s.sessionId = answer.sessionId;
-          if (OPTS.system) s.system = OPTS.system;
-        }),
-      );
+      const saved = updateSession(session.name, (s) => {
+        s.turns.push(turn);
+        if (answer.sessionId) s.sessionId = answer.sessionId;
+        if (OPTS.system) s.system = OPTS.system;
+      });
+      Object.assign(session, saved);
+      // The turn's own number, taken from the transcript that was actually
+      // written. Comparing lengths before and after would miscount whenever
+      // another process removed a turn while this answer was in flight.
+      return { ...answer, turn: saved.turns.length };
     }
     return answer;
   } finally {
@@ -315,13 +341,46 @@ async function runInteractive(): Promise<void> {
   );
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const prompt = () => T.accent("nithi ▸ ");
+
+  // Two speakers, named asymmetrically. The prompt used to read "nithi ▸ " in
+  // front of what the user types, which is the one label on screen and it named
+  // the wrong party.
+  const YOU = "you";
+  const NITHI = "nithi";
+  // Chrome is for a person reading a terminal. A piped or --raw session gets the
+  // bare conversation, so nothing new lands in a file or a pipe.
+  const chrome = !OPTS.raw && !OPTS.json && process.stdout.isTTY;
+  // The name stays even when the chrome is off (it says who is typing, which is
+  // the point), but the navigation escape follows the same gate as the label and
+  // the rule, so --raw and a redirected session emit no escapes.
+  const prompt = () => (chrome ? promptMark() : "") + T.accent(YOU + " ▸ ");
+
+  /**
+   * Closes a turn. Deliberately heavier and wider than the rule renderMarkdown
+   * draws for a `---` inside an answer, because the two used to be identical and
+   * the only strong line on screen marked a place that was not a boundary.
+   *
+   * Drawn after an answer rather than before a prompt: what the next line will
+   * be is unknowable at prompt time, and a rule announcing a turn that turned
+   * out to be `/help` numbered the conversation wrongly.
+   */
+  const closeTurn = (n?: number) => {
+    if (!chrome) return;
+    say("\n" + turnRule(cols(), n) + "\n");
+  };
 
   const ask = async (text: string, files: string[]) => {
+    let turn: number | undefined;
     try {
-      await askAndRecord(tx, session, text, files);
+      turn = (await askAndRecord(tx, session, text, files, chrome ? NITHI : undefined)).turn;
     } catch (e) {
       say(T.tag("! ") + (e as Error).message + "\n");
+    } finally {
+      // In the finally so /retry and /edit, which also produce a turn, close it
+      // the same way a typed question does, and so a question that failed is
+      // still separated from the next one. A failed question recorded no turn,
+      // so it closes without a number rather than claiming one.
+      closeTurn(turn);
     }
   };
 
@@ -710,7 +769,7 @@ ${b("Daemon")} ${T.muted("(a warm browser reused across calls; auto-started)")}
 ${b("Shell")}
   nithi completions bash|zsh|fish
 
-${b("In the REPL")}
+${b("In the REPL")} ${T.muted("(you ▸ asks, nithi answers, a numbered rule closes each turn)")}
   @path in a message      attach a file
   /session [NAME]         show or switch/resume a session
   /sessions               list saved sessions

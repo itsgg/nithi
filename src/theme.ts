@@ -62,8 +62,14 @@ export const T = {
   codeBg: bg([38, 38, 48]),
 };
 
+// SGR, then any OSC string (terminated by BEL or ST). The general OSC form
+// matters because prompt marking (OSC 133) and hyperlinks (OSC 8) both live
+// there, and a sequence left in the text would be counted as visible width and
+// silently misalign every table it appeared in.
 export const stripAnsi = (s: string) =>
-  s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "");
+  s
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 
 /** Visible width, ignoring colour and hyperlink escapes. */
 export const vlen = (s: string) => [...stripAnsi(s)].length;
@@ -78,5 +84,20 @@ export function renderLink(url: string, text: string): string {
   if (text === url) return T.link(underline(url));
   return T.link(underline(text)) + T.muted(" (" + url + ")");
 }
+
+/**
+ * OSC 133;A, the "a prompt starts here" marker.
+ *
+ * Terminals that understand it (foot, ghostty, kitty, WezTerm, iTerm2, VS Code,
+ * Windows Terminal) can then jump between prompts from the keyboard, which in a
+ * REPL means jumping between turns. Terminals that do not simply ignore it.
+ *
+ * Deliberately not tied to the colour setting: this is navigation metadata, not
+ * decoration, and NO_COLOR asks for plain text rather than a terminal stripped
+ * of the things that make it navigable. It is gated on writing to a terminal at
+ * all, so it never lands in a redirected file.
+ */
+export const PROMPT_MARK = "\x1b]133;A\x1b\\";
+export const promptMark = () => (process.stdout.isTTY ? PROMPT_MARK : "");
 
 export { ESC };

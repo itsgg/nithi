@@ -131,6 +131,32 @@ asks about the words rather than parsing them.
 
 ### In the REPL
 
+Turns are separated, and the two speakers are named. Your questions sit behind a
+`you ▸` prompt; each answer is headed `nithi`; and a heavy numbered rule closes
+each turn:
+
+```
+you ▸ what is dharma in one sentence
+
+nithi
+Dharma is the eternal cosmic law of righteousness...
+
+────────────────────────────────────────────────────────────
+
+Is this curiosity, or are you at a crossroads?
+
+━━━ 1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+you ▸ and karma, one sentence
+```
+
+The light 60-column rule in the middle is a `---` the model wrote inside its own
+answer. The heavy full-width one is the turn boundary. They are deliberately
+different weights, because when they were the same glyph the strongest line on
+screen marked a place that was not a boundary.
+
+None of this appears when the output is piped, or under `--raw` or `--json`: a
+redirected conversation is still just the conversation.
+
 ```
 @path in a message      attach a file
 /session [NAME]         show or switch/resume a session
@@ -145,6 +171,33 @@ asks about the words rather than parsing them.
 /forget NAME            delete a saved session
 /clear                  clear the screen
 /exit                   quit
+```
+
+### Moving around a long conversation
+
+nithi is append-only: it writes into your terminal's own scrollback rather than
+taking over the screen, so the conversation stays where your terminal can search
+and scroll it after nithi exits.
+
+It marks each prompt with [OSC 133](https://terminfo.dev/osc), the semantic
+prompt sequence, so a terminal that understands it can jump from turn to turn
+with the keyboard. In foot that is `Ctrl+Shift+z` and `Ctrl+Shift+x`; ghostty,
+kitty, WezTerm, iTerm2, VS Code and Windows Terminal have their own bindings.
+Terminals that do not know the sequence ignore it.
+
+Beyond that it is your terminal's scrollback, not nithi's. foot binds pages to
+`Shift+PageUp` / `Shift+PageDown` and search to `Ctrl+Shift+r` (then `Ctrl+r`
+and `Ctrl+s` to walk matches, so searching for `━━━ 12` lands on that turn).
+Finer movement is unbound by default and worth adding:
+
+```ini
+[key-bindings]
+scrollback-up-half-page=Control+Shift+u
+scrollback-down-half-page=Control+Shift+d
+scrollback-up-line=Control+Shift+k
+scrollback-down-line=Control+Shift+j
+scrollback-home=Control+Shift+Home
+scrollback-end=Control+Shift+End
 ```
 
 ### Environment

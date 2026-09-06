@@ -404,3 +404,22 @@ export function reconcileTail(streamed: string, full: string): string {
   if (complete === shown || !complete.startsWith(shown)) return "";
   return complete.slice(shown.length);
 }
+
+/**
+ * The line that closes a conversation turn.
+ *
+ * Deliberately unlike the rule renderMarkdown draws for a `---` inside an
+ * answer: heavier (U+2501 against U+2500) and full width against that rule's
+ * 60. They used to be the same glyph at similar widths, so the strongest
+ * horizontal line on screen marked a place that was not a turn boundary at all.
+ */
+export function turnRule(width: number, n?: number): string {
+  const w = Math.max(0, Math.floor(width) || 0);
+  // Give up the number, then the leading dashes, rather than overflow: a rule
+  // wider than the terminal wraps and stops looking like a boundary at all.
+  let label = n === undefined ? "" : ` ${n} `;
+  if (label.length + 1 > w) label = "";
+  const lead = Math.min(3, Math.max(0, w - label.length));
+  const tail = Math.max(0, w - lead - label.length);
+  return T.muted("━".repeat(lead)) + (label ? T.tag(label) : "") + T.muted("━".repeat(tail));
+}

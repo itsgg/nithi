@@ -6,8 +6,9 @@ import assert from "node:assert/strict";
 // escape codes; the colour paths are covered separately in theme.test.ts.
 process.env.NO_COLOR = "1";
 
-const { render, renderMarkdown, inline, safeCut, wrapPlain, stripAnsi, vlen, maxOf, reconcileTail } =
+const { render, renderMarkdown, inline, safeCut, wrapPlain, stripAnsi, vlen, maxOf, reconcileTail, turnRule } =
   await import("../src/render.js");
+const { promptMark } = await import("../src/theme.js");
 
 test("headings render with their text and a rule under h1", () => {
   const out = renderMarkdown("# Title");
@@ -210,4 +211,116 @@ test("a divergent final answer is not reprinted on top of the streamed one", () 
 test("an empty final answer never adds anything", () => {
   assert.equal(reconcileTail("shown", ""), "");
   assert.equal(reconcileTail("shown", undefined as unknown as string), "");
+});
+
+// --- escape stripping -------------------------------------------------------
+// vlen drives every table column width, so any escape it fails to recognise is
+// counted as visible text and silently misaligns the table it appears in.
+
+test("stripAnsi removes OSC 133 prompt marks", () => {
+  assert.equal(stripAnsi("\x1b]133;A\x1b\\you"), "you");
+  assert.equal(vlen("\x1b]133;A\x1b\\you ▸ "), 6);
+});
+
+test("stripAnsi removes OSC strings terminated by BEL as well as ST", () => {
+  assert.equal(stripAnsi("\x1b]0;a title\x07text"), "text");
+  assert.equal(stripAnsi("\x1b]8;;https://example.com\x1b\\link"), "link");
+});
+
+test("stripAnsi removes CSI sequences that are not colour", () => {
+  assert.equal(stripAnsi("\x1b[2Kcleared"), "cleared");
+  assert.equal(stripAnsi("\x1b[1;31mred\x1b[0m"), "red");
+  assert.equal(stripAnsi("\x1b[?25lhidden\x1b[?25h"), "hidden");
+});
+
+test("stripAnsi leaves ordinary text with brackets alone", () => {
+  assert.equal(stripAnsi("a [b] c ]133;A"), "a [b] c ]133;A");
+});
+
+test("the prompt mark is a well-formed OSC 133;A", async () => {
+  const { PROMPT_MARK } = await import("../src/theme.js");
+  assert.equal(PROMPT_MARK, "\x1b]133;A\x1b\\");
+  // and it is invisible: stripping escapes leaves nothing behind
+  assert.equal(stripAnsi(PROMPT_MARK), "");
+  assert.equal(vlen(PROMPT_MARK), 0);
+});
+
+// NO_COLOR asks for plain text, not for a terminal stripped of the things that
+// make it navigable, so the marker must not be tied to the colour setting. This
+// file runs with NO_COLOR set, so faking a TTY exercises exactly the case a
+// colour-gated implementation would get wrong.
+test("prompt marking follows the terminal, not the colour setting", () => {
+  const real = process.stdout.isTTY;
+  try {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    assert.equal(promptMark(), "\x1b]133;A\x1b\\", "NO_COLOR must not disable prompt marking");
+    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
+    assert.equal(promptMark(), "", "nothing should be written to a redirected stream");
+  } finally {
+    Object.defineProperty(process.stdout, "isTTY", { value: real, configurable: true });
+  }
+});
+
+// --- turn boundaries --------------------------------------------------------
+
+test("a turn rule carries its number and fills the width exactly", () => {
+  const r = turnRule(40, 7);
+  assert.match(r, /7/);
+  assert.equal(vlen(r), 40);
+});
+
+// The whole point: the model writes `---` inside answers, and that used to
+// render as the only strong horizontal line on screen, at a place that was not
+// a boundary. The two must not be confusable.
+test("a turn rule is not confusable with a markdown rule inside an answer", () => {
+  const turn = turnRule(80, 1);
+  const md = renderMarkdown("---");
+  assert.ok(turn.includes("━"), "turn rule should use the heavy glyph");
+  assert.ok(md.includes("─"), "markdown rule should use the light glyph");
+  assert.ok(!turn.includes("─"), "turn rule must not use the light glyph");
+  assert.ok(!md.includes("━"), "markdown rule must not use the heavy glyph");
+  assert.notEqual(vlen(turn), vlen(md.trim()));
+});
+
+// A rule wider than the terminal wraps, and a wrapped boundary stops reading as
+// a boundary. It gives up the number, then the leading dashes, before it grows.
+test("a turn rule never exceeds the width it was given", () => {
+  for (const w of [0, 1, 2, 3, 4, 5, 6, 10, 40]) {
+    for (const n of [undefined, 1, 1234, 999999]) {
+      const r = turnRule(w, n);
+      assert.equal(vlen(r), w, `turnRule(${w}, ${n}) was ${vlen(r)} wide`);
+    }
+  }
+});
+
+test("a turn rule keeps its number whenever the width allows one", () => {
+  assert.match(turnRule(40, 7), /7/);
+  assert.match(turnRule(5, 1), /1/);
+  assert.doesNotMatch(turnRule(3, 1), /1/, "no room for a number at width 3");
+});
+
+
+
+// A question that failed recorded no turn, so numbering it would claim a turn
+// that is not in the transcript.
+test("a turn rule with no number is still a full-width boundary", () => {
+  const r = turnRule(50);
+  assert.equal(vlen(r), 50);
+  assert.doesNotMatch(r, /\d/);
+  assert.ok(r.includes("━"));
+});
+
+// An answer that is only an empty code fence is non-empty text that renders to
+// nothing. The speaker label must follow the rendered answer, not the raw one,
+// or it stands over nothing.
+test("text that renders to nothing is recognised as empty", () => {
+  assert.equal(render("```\n```"), "");
+  assert.equal(render("   \n\n  "), "");
+  assert.notEqual(render("```\ncode\n```"), "");
+});
+
+test("a fractional width rounds down rather than overflowing", () => {
+  for (const w of [4.9, 10.5, 39.999]) {
+    assert.equal(vlen(turnRule(w, 3)), Math.floor(w), `turnRule(${w}, 3)`);
+  }
 });
