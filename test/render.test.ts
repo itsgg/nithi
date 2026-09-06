@@ -48,7 +48,8 @@ test("inline emphasis markers are consumed", () => {
   assert.equal(inline("**bold**"), "bold");
   assert.equal(inline("*em*"), "em");
   assert.equal(inline("__bold__"), "bold");
-  assert.equal(inline("a `code` b"), "a  code  b");
+  // Backticks are kept when there is no colour to carry the distinction.
+  assert.equal(inline("a `code` b"), "a `code` b");
 });
 
 test("inline links keep the label and expose the url when unlinked", () => {
@@ -323,4 +324,41 @@ test("a fractional width rounds down rather than overflowing", () => {
   for (const w of [4.9, 10.5, 39.999]) {
     assert.equal(vlen(turnRule(w, 3)), Math.floor(w), `turnRule(${w}, 3)`);
   }
+});
+
+// --- code blocks ------------------------------------------------------------
+
+test("a long code line is never truncated", () => {
+  const line = "const x = " + "y".repeat(140) + ";";
+  const out = renderMarkdown("```js\n" + line + "\n```");
+  assert.ok(out.includes(line), "the code line was cut short");
+});
+
+test("code lines carry no trailing padding", () => {
+  const out = renderMarkdown("```\nshort\na much longer line here\n```");
+  for (const l of out.split("\n")) assert.equal(l, l.replace(/\s+$/, ""), `trailing space: ${JSON.stringify(l)}`);
+});
+
+test("a code block still marks every line and names its language", () => {
+  const out = renderMarkdown("```python\nimport os\nprint(os.getcwd())\n```");
+  assert.match(out, /python/);
+  assert.match(out, /▕ import os/);
+  assert.match(out, /▕ print\(os\.getcwd\(\)\)/);
+});
+
+// --- inline code ------------------------------------------------------------
+// The backticks used to be replaced by a filled background. With the background
+// gone, colour alone would carry the distinction, which NO_COLOR readers do not
+// get. This file runs with NO_COLOR set.
+
+test("inline code stays distinguishable without colour", () => {
+  assert.equal(inline("use `npm test` now"), "use `npm test` now");
+});
+
+test("inline code carries no stray padding spaces", () => {
+  assert.doesNotMatch(inline("a `b` c"), /  /, "double space around inline code");
+});
+
+test("several inline spans in one line all survive", () => {
+  assert.equal(inline("`a` and `b`"), "`a` and `b`");
 });

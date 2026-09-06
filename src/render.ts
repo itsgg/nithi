@@ -1,6 +1,7 @@
 import {
   T,
   bold,
+  colorEnabled,
   italic,
   dim,
   cols,
@@ -20,7 +21,12 @@ export const maxOf = (xs: number[], seed = 0) => xs.reduce((a, b) => (b > a ? b 
 export function inline(s: string): string {
   const spans: string[] = [];
   const stash = (v: string) => `\x00${spans.push(v) - 1}\x00`;
-  s = s.replace(/`([^`]+)`/g, (_, c) => stash(T.codeBg(T.code(" " + c + " "))));
+  // Colour marks inline code when there is colour; the backticks stay when there
+  // is not, because a reader with NO_COLOR set should still be able to tell a
+  // command from the prose around it. There used to be a filled background here
+  // and the padding spaces that squared it off, which without the fill were just
+  // stray spaces in the middle of a sentence.
+  s = s.replace(/`([^`]+)`/g, (_, c) => stash(colorEnabled() ? T.code(c) : "`" + c + "`"));
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => stash(renderLink(u, t)));
   s = s.replace(/(^|[\s(])(https?:\/\/[^\s)\]]+)/g, (_, pre, u) => pre + stash(renderLink(u, u)));
   s = s.replace(/\*\*([^*]+)\*\*/g, (_, t) => bold(t));
@@ -153,17 +159,15 @@ function renderTableFromMd(tbl: string[]): string {
 // --- code blocks -----------------------------------------------------------
 
 function renderCodeBlock(code: string[], lang: string): string {
-  const width = Math.min(
-    maxOf(code.map((l) => l.length)),
-    Math.max(20, Math.min(cols() - 6, 100)),
-  );
   const out: string[] = [];
   if (lang) out.push("  " + T.muted(lang));
   const barCh = T.muted("▕");
-  for (const l of code) {
-    const padded = (l + " ".repeat(Math.max(0, width - l.length))).slice(0, width);
-    out.push("  " + barCh + T.codeBg(T.code(" " + padded + " ")));
-  }
+  // No padding and no truncation. Both existed to make a filled background
+  // rectangle look tidy, and the fill is gone; padding only added trailing
+  // whitespace to anything copied out, and truncation silently ate the end of
+  // any code line past the block width, which is the one thing a code block
+  // must never do.
+  for (const l of code) out.push("  " + barCh + T.code(" " + l));
   return out.join("\n");
 }
 

@@ -27,7 +27,7 @@ $ nithi "compare bhakti vs jnana yoga in a table"
 - **System steering.** `--system` prepends a soft instruction (format, length, tone) that persists per session.
 - **Fast by design.** A background daemon keeps one browser warm, so calls after the first are instant and don't repeatedly hit Cloudflare. It survives a dead page: if the browser crashes it relaunches itself rather than failing every later question.
 - **Scriptable.** `--json` gives you one machine-readable object, `--quiet` drops the progress ticker, `--timeout` bounds a slow answer, and everything that isn't the answer goes to stderr so pipes stay clean.
-- **Terminal-native rendering.** Truecolor with a 256-color fallback, clickable OSC 8 links, boxed tables, and styled code blocks. Honors `NO_COLOR`.
+- **Wears your terminal's theme.** Colour comes from the terminal's own 16-colour palette rather than from fixed values, so nithi matches whatever theme the terminal is already wearing instead of imposing one. Clickable OSC 8 links, boxed tables, styled code blocks, and everything still legible with `NO_COLOR` set.
 - **Shell completions** for bash, zsh and fish, and a `nithi doctor` that tells you what's wrong when something is.
 
 ## Install
@@ -321,7 +321,7 @@ The code is split so that everything except the browser is testable without one:
 | Module | Responsibility |
 |--------|----------------|
 | `src/args.ts` | Argument parsing, and the usage errors it raises |
-| `src/theme.ts` | Colour, 256-colour fallback, OSC 8 links, visible width |
+| `src/theme.ts` | Colour as terminal palette roles, OSC 8 links, prompt marking, visible width |
 | `src/render.ts` | Markdown, tables, code blocks, `<openui>`, streaming block boundaries |
 | `src/protocol.ts` | SSE parsing, message building, `@path` attachments |
 | `src/session.ts` | The session store: atomic writes, validation, export |

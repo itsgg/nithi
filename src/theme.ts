@@ -8,7 +8,28 @@ let useColor =
   !process.env.NO_COLOR && (process.stdout.isTTY || !!process.env.FORCE_COLOR);
 let hyperlinks = useColor && !process.env.NO_HYPERLINKS && process.env.TERM !== "dumb";
 
-const TRUECOLOR = process.env.COLORTERM === "truecolor" || process.env.COLORTERM === "24bit";
+// Colour comes from the terminal's own 16-colour palette rather than from fixed
+// RGB values. That is what makes nithi follow the theme the terminal is already
+// wearing: the same code reads as warm in a warm theme and cool in a cool one,
+// and a hand-picked orange cannot clash with a palette it has never seen.
+const ANSI = {
+  black: 30,
+  red: 31,
+  green: 32,
+  yellow: 33,
+  blue: 34,
+  magenta: 35,
+  cyan: 36,
+  white: 37,
+  brightBlack: 90,
+  brightRed: 91,
+  brightGreen: 92,
+  brightYellow: 93,
+  brightBlue: 94,
+  brightMagenta: 95,
+  brightCyan: 96,
+  brightWhite: 97,
+} as const;
 
 /** Force plain output (used by --raw and --json). */
 export function setPlain(plain: boolean): void {
@@ -17,6 +38,7 @@ export function setPlain(plain: boolean): void {
   hyperlinks = false;
 }
 
+/** Whether colour is being emitted, for the few places that must not rely on it. */
 export const colorEnabled = () => useColor;
 
 /** Terminal width, read live so a mid-session resize is picked up. */
@@ -30,42 +52,19 @@ export const italic = attr("3", "23");
 export const dim = attr("2", "22");
 export const underline = attr("4", "24");
 
-export function to256(r: number, g: number, b: number): number {
-  if (r === g && g === b) {
-    if (r < 8) return 16;
-    if (r > 248) return 231;
-    return Math.round(((r - 8) / 247) * 24) + 232;
-  }
-  const q = (v: number) => Math.round((v / 255) * 5);
-  return 16 + 36 * q(r) + 6 * q(g) + q(b);
-}
-
-const colorFn = (layer: 38 | 48, reset: 39 | 49) => (rgb: [number, number, number]) => {
-  const [r, g, b] = rgb;
-  return (s: string) => {
-    if (!useColor) return s;
-    const code = TRUECOLOR ? `${layer};2;${r};${g};${b}` : `${layer};5;${to256(r, g, b)}`;
-    return `${ESC}${code}m${s}${ESC}${reset}m`;
-  };
-};
-const fg = colorFn(38, 39);
-const bg = colorFn(48, 49);
+const fg = (code: number) => (s: string) =>
+  useColor ? `${ESC}${code}m${s}${ESC}39m` : s;
 
 export const T = {
-  h1: fg([245, 158, 66]),
-  h2: fg([234, 179, 8]),
-  accent: fg([245, 158, 66]),
-  tag: fg([250, 204, 21]),
-  muted: fg([130, 130, 145]),
-  link: fg([96, 165, 250]),
-  code: fg([236, 186, 120]),
-  codeBg: bg([38, 38, 48]),
+  h1: fg(ANSI.brightBlue),
+  h2: fg(ANSI.blue),
+  accent: fg(ANSI.brightCyan),
+  tag: fg(ANSI.yellow),
+  muted: fg(ANSI.brightBlack),
+  link: fg(ANSI.brightBlue),
+  code: fg(ANSI.green),
 };
 
-// SGR, then any OSC string (terminated by BEL or ST). The general OSC form
-// matters because prompt marking (OSC 133) and hyperlinks (OSC 8) both live
-// there, and a sequence left in the text would be counted as visible width and
-// silently misalign every table it appeared in.
 export const stripAnsi = (s: string) =>
   s
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")

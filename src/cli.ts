@@ -81,11 +81,16 @@ function spinner(label = "thinking") {
  * append-only so nothing on screen is ever rewritten (no flicker), and shows a
  * dim single-line ticker of the in-progress block below them.
  */
+const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 function streamRender(label?: string) {
   const ticker = !OPTS.quiet && !OPTS.json && process.stderr.isTTY;
   let buf = "";
   let printed = 0;
   let streamed = ""; // every delta received, to reconcile against the final text
+  let frame = 0;
+  let since = 0;
+  let beat: NodeJS.Timeout | undefined;
   // Printed once, immediately above the first block of the answer, so the reply
   // is marked by something it has rather than by the absence of a prompt.
   let labelled = false;
@@ -97,12 +102,25 @@ function streamRender(label?: string) {
   const clearTicker = () => {
     if (ticker) process.stderr.write("\r" + ESC + "2K");
   };
+  const stopBeat = () => {
+    if (beat) clearInterval(beat);
+    beat = undefined;
+  };
   const showTicker = () => {
     if (!ticker) return;
+    const secs = Math.floor((Date.now() - since) / 1000);
     const tail = buf.replace(/\s+/g, " ").trim();
-    const room = Math.max(10, cols() - 4);
+    // Counted only while nothing has arrived yet, and only once the wait is long
+    // enough to wonder about. Answer text arriving is its own evidence of
+    // progress. This asks whether anything has ever arrived rather than whether
+    // the buffer holds something now: the buffer empties every time a block is
+    // flushed, which would bring the clock back between paragraphs.
+    const waiting = streamed.trim() === "";
+    const elapsed = waiting && secs >= 2 ? ` ${secs}s` : "";
+    const glyph = SPIN[frame++ % SPIN.length];
+    const room = Math.max(10, cols() - 4 - elapsed.length);
     const s = tail.length > room ? "…" + tail.slice(-(room - 1)) : tail || "thinking…";
-    process.stderr.write("\r" + ESC + "2K" + T.accent("◍ ") + T.muted(s));
+    process.stderr.write("\r" + ESC + "2K" + T.accent(glyph + " ") + T.muted(s + elapsed));
   };
   const flush = (final: boolean) => {
     for (;;) {
@@ -122,6 +140,21 @@ function streamRender(label?: string) {
     }
   };
   return {
+    /**
+     * Acknowledge the question straight away.
+     *
+     * The ticker used to redraw only when a delta arrived, so between pressing
+     * Enter and the model's first token the screen showed nothing at all. That
+     * gap is routinely five to ten seconds, which reads as a hang rather than
+     * as thinking.
+     */
+    begin() {
+      if (!ticker || beat) return;
+      since = Date.now();
+      showTicker();
+      beat = setInterval(showTicker, 100);
+      beat.unref?.();
+    },
     push(chunk: string) {
       if (OPTS.json) return; // --json prints one object at the end, nothing before it
       streamed += chunk;
@@ -130,6 +163,7 @@ function streamRender(label?: string) {
       showTicker();
     },
     finish(content: string) {
+      stopBeat();
       if (OPTS.json) return;
       flush(true);
       clearTicker();
@@ -146,6 +180,7 @@ function streamRender(label?: string) {
       }
     },
     stop() {
+      stopBeat();
       clearTicker();
     },
   };
@@ -261,6 +296,7 @@ async function askAndRecord(
   label?: string,
 ): Promise<Recorded> {
   const sr = streamRender(label);
+  sr.begin();
   try {
     const useSession = session && !OPTS.fresh ? session.sessionId : undefined;
     const system = OPTS.system ?? session?.system;
