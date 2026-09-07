@@ -277,3 +277,13 @@ test("capping an error never splits a character in half", () => {
     const withoutPairs = m.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, "");
     assert.doesNotMatch(withoutPairs, /[\uD800-\uDFFF]/, "a half character survived the cap");
 });
+
+// A cut that falls between a letter and its accent produces a different letter.
+test("capping never separates a character from its accent", () => {
+  const accented = "e" + String.fromCharCode(0x0301); // e + combining acute
+  const raw = "data: " + JSON.stringify({ event: "RunError", error: accented.repeat(300) });
+  // Asserted exactly. Truncating by code point instead would end with a bare
+  // "e", its accent left on the other side of the cut, and a test that only
+  // looked for a stranded accent would happily accept that.
+  assert.equal(noAnswer(raw), accented.repeat(199) + "…");
+});

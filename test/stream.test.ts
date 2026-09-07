@@ -248,3 +248,52 @@ test("stop is safe without begin, and safe twice", async () => {
   h.sr.stop();
   assert.ok(await h.settled());
 });
+
+// --- what reached the reader ------------------------------------------------
+// A failure needs to know whether the reader is already looking at half an
+// answer, so it can keep it and say it was cut short.
+
+test("shown reports everything that was printed", () => {
+  const h = harness({ label: "nithi" });
+  h.sr.push("first paragraph\n\n");
+  h.sr.push("second paragraph\n\n");
+  assert.equal(h.sr.shown(), "first paragraph\n\nsecond paragraph\n\n");
+});
+
+// The reader has seen nothing durable until a block is printed. Deltas still in
+// the buffer have only flickered through the progress line, which is cleared.
+test("shown is empty while deltas are still buffered", () => {
+  const h = harness({ label: "nithi" });
+  h.sr.push("half a sentence with no block boundary yet");
+  assert.equal(h.stdout(), "", "premise: nothing was printed");
+  assert.equal(h.sr.shown(), "");
+});
+
+test("shown is empty for content that renders to nothing", () => {
+  const h = harness({ label: "nithi" });
+  h.sr.push("```\n```\n\n");
+  assert.equal(h.stdout(), "", "premise: an empty fence prints nothing");
+  assert.equal(h.sr.shown(), "");
+});
+
+test("shown is empty before anything arrives", () => {
+  const h = harness({ label: "nithi" });
+  assert.equal(h.sr.shown(), "");
+  h.sr.begin();
+  assert.equal(h.sr.shown(), "");
+});
+
+test("shown reports nothing in json mode, where nothing was displayed", () => {
+  const h = harness({ label: "nithi", json: true });
+  h.sr.push("text");
+  assert.equal(h.sr.shown(), "", "json mode displayed nothing, so nothing was shown");
+});
+
+test("shown excludes a tail that was buffered but never printed", () => {
+  const h = harness({ label: "nithi" });
+  h.sr.push("first paragraph\n\n");
+  h.sr.push("a tail with no boundary yet");
+  assert.match(h.stdout(), /first paragraph/);
+  assert.doesNotMatch(h.stdout(), /a tail/, "premise: the tail was not printed");
+  assert.equal(h.sr.shown(), "first paragraph\n\n");
+});

@@ -17,6 +17,8 @@ export interface Turn {
   q: string;
   a: string;
   at: number;
+  /** The answer was cut short: what is here is what arrived, not the whole reply. */
+  partial?: boolean;
 }
 
 export interface Session {
@@ -59,7 +61,7 @@ function coerce(raw: unknown, fallbackName: string): Session | null {
         const r = t as Record<string, unknown>;
         if (typeof r.q !== "string" || typeof r.a !== "string") return acc;
         const at = typeof r.at === "number" && Number.isFinite(r.at) ? r.at : Date.now();
-        acc.push({ q: r.q, a: r.a, at });
+        acc.push(r.partial === true ? { q: r.q, a: r.a, at, partial: true } : { q: r.q, a: r.a, at });
         return acc;
       }, [])
     : [];
@@ -187,6 +189,8 @@ export function exportSessionMarkdown(s: Session): string {
     out.push(`## ${t.q}`, "");
     if (at) out.push(`*${at}*`, "");
     out.push(t.a, "");
+    // Said plainly, so a transcript never presents a fragment as a whole answer.
+    if (t.partial) out.push("*(this answer was cut short)*", "");
   }
   return out.join("\n");
 }

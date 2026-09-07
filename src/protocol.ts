@@ -30,10 +30,26 @@ function oneLine(s: string, max = 200): string {
     .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  // Sliced by code point, so the cap cannot fall between the halves of a
-  // surrogate pair and leave a broken character at the end.
-  const points = [...flat];
-  return points.length > max ? points.slice(0, max - 1).join("") + "…" : flat;
+  return truncate(flat, max);
+}
+
+/**
+ * Cut to `max` user-perceived characters.
+ *
+ * Segmented by grapheme, not by code unit or code point, so the cut can fall
+ * neither between the halves of a surrogate pair nor between a letter and the
+ * accent that belongs to it.
+ */
+function truncate(s: string, max: number): string {
+  let units: string[];
+  try {
+    units = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s)].map(
+      (g) => g.segment,
+    );
+  } catch {
+    units = [...s]; // no Segmenter: code points still never split a pair
+  }
+  return units.length > max ? units.slice(0, max - 1).join("") + "…" : s;
 }
 
 /** The stream was well formed but carried no answer. */

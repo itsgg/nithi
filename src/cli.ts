@@ -38,6 +38,20 @@ import { Nithi, type Answer } from "./browser.js";
 interface Recorded extends Answer {
   turn?: number;
 }
+
+/**
+ * The answer stopped part way, and what arrived is on screen and in the
+ * transcript. Carries the turn number so the boundary drawn afterwards can
+ * name the turn that really was recorded.
+ */
+export class CutShortError extends Error {
+  constructor(
+    message: string,
+    readonly turn?: number,
+  ) {
+    super(message);
+  }
+}
 import { clipboardCopy, editorCompose } from "./system.js";
 import {
   DEFAULT_TIMEOUT_MS,
@@ -54,7 +68,10 @@ import { VERSION } from "./version.js";
 // sessions with real conversation memory and file attachments.
 // ---------------------------------------------------------------------------
 
-let OPTS: Opts;
+// Defaulted rather than merely declared, so importing this module leaves it in
+// a sane state. main() replaces it with the real arguments; a test can drive the
+// flows without it being undefined underfoot.
+let OPTS: Opts = parseArgs([]);
 const timeoutMs = () => (OPTS.timeout ? OPTS.timeout * 1000 : DEFAULT_TIMEOUT_MS);
 
 // --- output helpers --------------------------------------------------------
@@ -193,7 +210,7 @@ function resolveSession(): Session | null {
   return null;
 }
 
-async function askAndRecord(
+export async function askAndRecord(
   tx: Transport,
   session: Session | null,
   question: string,
@@ -230,6 +247,23 @@ async function askAndRecord(
       return { ...answer, turn: saved.turns.length };
     }
     return answer;
+  } catch (e) {
+    // The reader may already be looking at half an answer. Keeping it, saying
+    // it was cut short, and recording it as such is the only way the screen and
+    // the transcript agree about what happened; dropping it left text on screen
+    // that /history and an export both denied ever existed.
+    const shown = sr.shown().trim();
+    if (!shown) throw e;
+    let turn: number | undefined;
+    if (session) {
+      const saved = updateSession(session.name, (s) => {
+        s.turns.push({ q: question, a: shown, at: Date.now(), partial: true });
+        if (OPTS.system) s.system = OPTS.system;
+      });
+      Object.assign(session, saved);
+      turn = saved.turns.length;
+    }
+    throw new CutShortError(`the answer above was cut short: ${(e as Error).message}`, turn);
   } finally {
     sr.stop();
   }
@@ -315,6 +349,9 @@ async function runInteractive(): Promise<void> {
     try {
       turn = (await askAndRecord(tx, session, text, files, chrome ? NITHI : undefined)).turn;
     } catch (e) {
+      // A cut-short answer was still recorded, so the boundary names its turn:
+      // an unnumbered rule would say nothing was kept when something was.
+      if (e instanceof CutShortError) turn = e.turn;
       say(T.tag("! ") + (e as Error).message + "\n");
     } finally {
       // In the finally so /retry and /edit, which also produce a turn, close it

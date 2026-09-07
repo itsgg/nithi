@@ -25,6 +25,14 @@ export interface StreamRender {
   push(chunk: string): void;
   finish(content: string): void;
   stop(): void;
+  /**
+   * The text that actually landed on the screen, so a failure can say what
+   * survived. Not the deltas received: text still sitting in the buffer when a
+   * question fails has only ever appeared in the progress line, which is
+   * transient and gets cleared, and text that renders to nothing was never
+   * there at all.
+   */
+  shown(): string;
 }
 
 /**
@@ -51,6 +59,7 @@ export function createStreamRender(o: StreamOptions = {}): StreamRender {
   let buf = "";
   let printed = 0;
   let streamed = ""; // every delta received, to reconcile against the final text
+  let displayed = ""; // only the part of it that actually reached the screen
   let frame = 0;
   let since = 0;
   let beat: NodeJS.Timeout | undefined;
@@ -94,12 +103,17 @@ export function createStreamRender(o: StreamOptions = {}): StreamRender {
     for (;;) {
       const cut = final ? buf.length : safeCut(buf);
       if (cut <= 0) break;
-      const block = render(buf.slice(0, cut));
+      const source = buf.slice(0, cut);
       buf = buf.slice(cut);
+      const block = render(source);
       if (block) {
         clearTicker();
         speaker();
         out(lead() + block + "\n");
+        // The source of a block that was printed, not merely one that was
+        // consumed: a fence that renders to nothing reached nobody, and neither
+        // did whatever is still sitting in the buffer when a question fails.
+        displayed += source;
         printed++;
       }
       if (final) break;
@@ -144,12 +158,16 @@ export function createStreamRender(o: StreamOptions = {}): StreamRender {
       if (block) {
         speaker();
         out(lead() + block + "\n");
+        displayed += tail;
         printed++;
       }
     },
     stop() {
       stopBeat();
       clearTicker();
+    },
+    shown() {
+      return displayed;
     },
   };
 }
