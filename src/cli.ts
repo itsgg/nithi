@@ -18,7 +18,8 @@ import { spawn } from "node:child_process";
 import { parseArgs, UsageError, type Opts } from "./args.js";
 import { CACHE, DIR_MODE, DLOG, DPID, FILE_MODE, SESS_DIR, SOCK, STATE_FILE } from "./paths.js";
 import { ESC, T, bold, cols, dim, promptMark, setPlain } from "./theme.js";
-import { reconcileTail, render, safeCut, turnRule } from "./render.js";
+import { render, turnRule } from "./render.js";
+import { createStreamRender } from "./stream.js";
 import { buildMessage, extractAtFiles } from "./protocol.js";
 import {
   exportSessionMarkdown,
@@ -81,109 +82,13 @@ function spinner(label = "thinking") {
  * append-only so nothing on screen is ever rewritten (no flicker), and shows a
  * dim single-line ticker of the in-progress block below them.
  */
-const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
+/** Wires the progressive renderer to this invocation's flags and streams. */
 function streamRender(label?: string) {
-  const ticker = !OPTS.quiet && !OPTS.json && process.stderr.isTTY;
-  let buf = "";
-  let printed = 0;
-  let streamed = ""; // every delta received, to reconcile against the final text
-  let frame = 0;
-  let since = 0;
-  let beat: NodeJS.Timeout | undefined;
-  // Printed once, immediately above the first block of the answer, so the reply
-  // is marked by something it has rather than by the absence of a prompt.
-  let labelled = false;
-  const speaker = () => {
-    if (labelled || !label) return;
-    labelled = true;
-    process.stdout.write("\n" + T.tag(label) + "\n");
-  };
-  const clearTicker = () => {
-    if (ticker) process.stderr.write("\r" + ESC + "2K");
-  };
-  const stopBeat = () => {
-    if (beat) clearInterval(beat);
-    beat = undefined;
-  };
-  const showTicker = () => {
-    if (!ticker) return;
-    const secs = Math.floor((Date.now() - since) / 1000);
-    const tail = buf.replace(/\s+/g, " ").trim();
-    // Counted only while nothing has arrived yet, and only once the wait is long
-    // enough to wonder about. Answer text arriving is its own evidence of
-    // progress. This asks whether anything has ever arrived rather than whether
-    // the buffer holds something now: the buffer empties every time a block is
-    // flushed, which would bring the clock back between paragraphs.
-    const waiting = streamed.trim() === "";
-    const elapsed = waiting && secs >= 2 ? ` ${secs}s` : "";
-    const glyph = SPIN[frame++ % SPIN.length];
-    const room = Math.max(10, cols() - 4 - elapsed.length);
-    const s = tail.length > room ? "…" + tail.slice(-(room - 1)) : tail || "thinking…";
-    process.stderr.write("\r" + ESC + "2K" + T.accent(glyph + " ") + T.muted(s + elapsed));
-  };
-  const flush = (final: boolean) => {
-    for (;;) {
-      const cut = final ? buf.length : safeCut(buf);
-      if (cut <= 0) break;
-      const out = render(buf.slice(0, cut));
-      buf = buf.slice(cut);
-      if (out) {
-        clearTicker();
-        speaker();
-        // The label supplies the blank line above the first block; every later
-        // block needs its own, or the answer's paragraphs and rules run together.
-        process.stdout.write((printed === 0 && label ? "" : "\n") + out + "\n");
-        printed++;
-      }
-      if (final) break;
-    }
-  };
-  return {
-    /**
-     * Acknowledge the question straight away.
-     *
-     * The ticker used to redraw only when a delta arrived, so between pressing
-     * Enter and the model's first token the screen showed nothing at all. That
-     * gap is routinely five to ten seconds, which reads as a hang rather than
-     * as thinking.
-     */
-    begin() {
-      if (!ticker || beat) return;
-      since = Date.now();
-      showTicker();
-      beat = setInterval(showTicker, 100);
-      beat.unref?.();
-    },
-    push(chunk: string) {
-      if (OPTS.json) return; // --json prints one object at the end, nothing before it
-      streamed += chunk;
-      buf += chunk;
-      flush(false);
-      showTicker();
-    },
-    finish(content: string) {
-      stopBeat();
-      if (OPTS.json) return;
-      flush(true);
-      clearTicker();
-      // No deltas streamed (some responses only carry the final): print it once.
-      // Otherwise top up whatever the stream stopped short of.
-      const tail = printed === 0 ? (content ?? "").trim() : reconcileTail(streamed, content);
-      // Render first, then decide: an answer that is only an empty code fence is
-      // non-empty text that renders to nothing, and would otherwise leave a
-      // speaker label standing over no answer at all.
-      const out = tail.trim() ? render(tail) : "";
-      if (out) {
-        speaker();
-        process.stdout.write((printed === 0 && label ? "" : "\n") + out + "\n");
-      }
-    },
-    stop() {
-      stopBeat();
-      clearTicker();
-    },
-  };
+  return createStreamRender({
+    label,
+    json: OPTS.json,
+    ticker: !OPTS.quiet && !OPTS.json && process.stderr.isTTY,
+  });
 }
 
 const say = (s: string) => process.stdout.write(s);

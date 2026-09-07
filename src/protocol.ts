@@ -14,10 +14,38 @@ export const MAX_TOTAL_CHARS = 400_000;
  * `RunContent` deltas; `RunCompleted` repeats the full answer and carries the
  * session_id needed to continue the conversation.
  */
+/**
+ * Collapse untrusted text to a single bounded line.
+ *
+ * Whatever the service puts in an error field is going to be printed in the
+ * user's terminal, so it arrives with its control characters removed, its
+ * newlines flattened and its length capped: an error is a line, not a payload.
+ */
+function oneLine(s: string, max = 200): string {
+  const flat = s
+    // C0 and C1 controls, then the invisible characters that reorder or hide
+    // what follows them: a right-to-left override in an error message can make
+    // the rest of the line read backwards in the terminal.
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Sliced by code point, so the cap cannot fall between the halves of a
+  // surrogate pair and leave a broken character at the end.
+  const points = [...flat];
+  return points.length > max ? points.slice(0, max - 1).join("") + "…" : flat;
+}
+
+/** The stream was well formed but carried no answer. */
+export class NoAnswerError extends Error {}
+
 export function parseRun(raw: string): { content: string; sessionId?: string } {
   let completed = "";
   let deltas = "";
   let sessionId: string | undefined;
+  let failure = "";
+  let parsed = 0;
+  const events: string[] = [];
   for (const line of raw.split("\n")) {
     const s = line.trim();
     if (!s.startsWith("data:")) continue;
@@ -25,14 +53,48 @@ export function parseRun(raw: string): { content: string; sessionId?: string } {
     if (!payload || payload === "[DONE]") continue;
     try {
       const j = JSON.parse(payload);
+      parsed++;
       if (typeof j.session_id === "string") sessionId = j.session_id;
-      if (j.event === "RunCompleted" && typeof j.content === "string") completed = j.content;
-      else if (j.event === "RunContent" && typeof j.content === "string") deltas += j.content;
+      const event = typeof j.event === "string" ? j.event : "";
+      if (event && !events.includes(event)) events.push(event);
+      if (event === "RunCompleted" && typeof j.content === "string") completed = j.content;
+      else if (event === "RunContent" && typeof j.content === "string") deltas += j.content;
+      else if (!failure) {
+        // Only fields the service labels as errors. Not `content`, which on an
+        // unknown event could be anything at all.
+        const reported = typeof j.error === "string" ? j.error : typeof j.detail === "string" ? j.detail : "";
+        if (reported) failure = oneLine(reported);
+        else if (/error|fail|cancel/i.test(event)) failure = oneLine(`the service reported ${event}`);
+      }
     } catch {
       // ignore unparseable lines
     }
   }
-  return { content: (completed || deltas || raw).trim(), sessionId };
+
+  // Trim before choosing, not after. A whitespace-only RunCompleted is truthy,
+  // and used to mask perfectly good deltas that the user had already watched
+  // arrive, turning a delivered answer into an error.
+  const content = completed.trim() || deltas.trim();
+  if (content) return { content, sessionId };
+
+  // The stream parsed but carried no answer: lifecycle events only, or an error
+  // the service reported inside the stream. Returning the raw body here used to
+  // print the whole SSE transcript, hundreds of lines of JSON including the
+  // session id, as if it were the reply. The test is whether anything parsed at
+  // all, not whether an event carried a name: the name can live on the SSE
+  // `event:` line, which is not JSON and never reaches this parser.
+  if (parsed > 0) {
+    const seen = events
+      .slice(0, 6)
+      .map((e) => oneLine(e, 40))
+      .join(", ");
+    throw new NoAnswerError(
+      oneLine(failure || `the service sent no answer${seen ? ` (events: ${seen})` : ""}`),
+    );
+  }
+
+  // Not an event stream at all: whatever the body is, it is all we have.
+  return { content: raw.trim(), sessionId };
 }
 
 /**
