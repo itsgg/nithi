@@ -232,6 +232,26 @@ test("content on an unknown event is never copied into the error", () => {
     assert.doesNotMatch(m, /SECRET-TOKEN/);
 });
 
+test("a RunError carrying content uses that as the failure message", () => {
+  const raw =
+    "data: " +
+    JSON.stringify({
+      event: "RunError",
+      content: "Unable to verify content safety. Please try again.",
+      error_type: "input_check_error",
+      error_id: "input_not_allowed",
+    });
+  const m = noAnswer(raw);
+  assert.equal(m, "Unable to verify content safety. Please try again.");
+});
+
+test("an empty error field does not hide a RunError's explanation", () => {
+  const raw = "data: " + JSON.stringify({ event: "RunError", error: "  ", detail: "", content: "blocked by the check" });
+  assert.equal(noAnswer(raw), "blocked by the check");
+  const both = "data: " + JSON.stringify({ event: "RunError", error: "the error field", content: "the content" });
+  assert.equal(noAnswer(both), "the error field", "error still comes first");
+});
+
 // The name can live on the SSE `event:` line, which is not JSON and never
 // reaches the parser, so a stream can carry an error with no event name at all.
 test("an error with its name only on the SSE line does not fall back to the raw body", () => {

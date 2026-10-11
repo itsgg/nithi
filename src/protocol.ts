@@ -76,9 +76,13 @@ export function parseRun(raw: string): { content: string; sessionId?: string } {
       if (event === "RunCompleted" && typeof j.content === "string") completed = j.content;
       else if (event === "RunContent" && typeof j.content === "string") deltas += j.content;
       else if (!failure) {
-        // Only fields the service labels as errors. Not `content`, which on an
-        // unknown event could be anything at all.
-        const reported = typeof j.error === "string" ? j.error : typeof j.detail === "string" ? j.detail : "";
+        // Only fields the service labels as errors. On a RunError event, `content`
+        // carries the service's explanation (e.g. content safety check errors);
+        // on unknown events `content` is ignored as it could be anything.
+        // The first that says something: an empty `error` must not hide the
+        // explanation in `content` (Cursor 2026-10-11).
+        const said = (v: unknown) => (typeof v === "string" && v.trim() ? v : "");
+        const reported = said(j.error) || said(j.detail) || (event === "RunError" ? said(j.content) : "");
         if (reported) failure = oneLine(reported);
         else if (/error|fail|cancel/i.test(event)) failure = oneLine(`the service reported ${event}`);
       }
