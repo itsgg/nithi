@@ -10,6 +10,7 @@ export interface Opts {
   list: boolean;
   raw: boolean;
   json: boolean;
+  markdown: boolean;
   quiet: boolean;
   help: boolean;
   version: boolean;
@@ -28,6 +29,7 @@ export function parseArgs(argv: string[]): Opts {
     list: false,
     raw: false,
     json: false,
+    markdown: false,
     quiet: false,
     help: false,
     version: false,
@@ -98,6 +100,9 @@ export function parseArgs(argv: string[]): Opts {
         break;
       case "--json":
         o.json = true;
+        break;
+      case "--markdown":
+        o.markdown = true;
         break;
       case "-q":
       case "--quiet":

@@ -1,5 +1,5 @@
 import { ESC, T, cols } from "./theme.js";
-import { reconcileTail, render, safeCut } from "./render.js";
+import { closeCard, markdownOf, openuiMarkdown, reconcileTail, render, safeCut } from "./render.js";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -170,4 +170,98 @@ export function createStreamRender(o: StreamOptions = {}): StreamRender {
       return displayed;
     },
   };
+}
+
+/**
+ * The answer as Markdown, written as it arrives, for a program that draws
+ * Markdown itself (a launcher's pane): no rendering and no progress line.
+ * An <openui> block is held until it closes and written as Markdown
+ * (openuiMarkdown); a "<" that may open one is held until it is known not
+ * to. `shown` is the answer's own text written so far, cards as the service
+ * sent them, which is what a cut-short turn records.
+ */
+export function createMarkdownStream(out: (s: string) => void = (s) => process.stdout.write(s)): StreamRender {
+  let shown = "";
+  let held = "";
+  let wrote = "";
+  const write = (s: string) => {
+    if (!s) return;
+    wrote += s;
+    out(s);
+  };
+  // A card opens where "<openui" ends a word: "<openuiX" is text (Cursor 2026-10-11).
+  const OPEN = /<openui(?=[\s>])/;
+  // How much of the end of `s` could still become a card's opening.
+  const opening = (s: string) => {
+    for (let n = Math.min(s.length, 7); n > 0; n--) if ("<openui ".startsWith(s.slice(-n)) || "<openui>".startsWith(s.slice(-n))) return n;
+    return 0;
+  };
+  // Where the card at the start of `s` closes: the first "</openui>" outside
+  // its quoted strings, which may hold that text themselves; -1 while open.
+  const closing = (s: string) => {
+    let quoted = false;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (quoted && c === "\\") i++;
+      else if (c === '"') quoted = !quoted;
+      else if (!quoted && s.startsWith("</openui>", i)) return i + "</openui>".length;
+    }
+    return -1;
+  };
+  const drain = () => {
+    for (;;) {
+      const m = OPEN.exec(held);
+      if (!m) {
+        const keep = opening(held);
+        const go = held.slice(0, held.length - keep);
+        write(go);
+        shown += go;
+        held = held.slice(go.length);
+        return;
+      }
+      if (m.index > 0) {
+        write(held.slice(0, m.index));
+        shown += held.slice(0, m.index);
+        held = held.slice(m.index);
+      }
+      const end = closing(held);
+      if (end < 0) return;
+      const block = held.slice(0, end);
+      write(openuiMarkdown(block));
+      shown += block;
+      held = held.slice(end);
+    }
+  };
+  // What is still held, written as it can be: a card that never closed as
+  // one that did, anything else as it is.
+  const release = () => {
+    if (!held) return;
+    write(OPEN.test(held) ? markdownOf(closeCard(held)) : held);
+    shown += held;
+    held = "";
+  };
+  return {
+    begin() {},
+    push(chunk: string) {
+      held += chunk;
+      drain();
+    },
+    finish(content: string) {
+      const full = content ?? "";
+      const sent = shown + held;
+      if (full.length > sent.length && full.startsWith(sent)) held += full.slice(sent.length);
+      drain();
+      release();
+      if (wrote && !wrote.endsWith("\n")) out("\n");
+    },
+    stop() {},
+    shown() {
+      return shown;
+    },
+    /** An answer cut short: what was held goes out too, so the reader keeps it. */
+    release() {
+      drain();
+      release();
+    },
+  } as StreamRender & { release(): void };
 }

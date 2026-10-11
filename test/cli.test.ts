@@ -245,3 +245,12 @@ async function fakeDaemon(sockPath: string) {
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
 }
+
+test("--markdown refuses the REPL, --json, and an empty question, with nothing on stdout", () => {
+  assert.equal(run(["--markdown", "--json", "q"]).status, 2);
+  assert.match(run(["--markdown", "-i", "q"]).stderr, /--markdown is for one-shot questions/);
+  const empty = run(["--markdown"], { input: "" });
+  assert.equal(empty.status, 2);
+  assert.equal(empty.stdout, "");
+  assert.match(empty.stderr, /no question/);
+});

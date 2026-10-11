@@ -362,3 +362,33 @@ test("inline code carries no stray padding spaces", () => {
 test("several inline spans in one line all survive", () => {
   assert.equal(inline("`a` and `b`"), "`a` and `b`");
 });
+
+// --- openui as Markdown, for --markdown ---------------------------------------
+
+test("an openui card becomes Markdown: title bold, subtitle and tag in italics", async () => {
+  const { openuiMarkdown } = await import("../src/render.js");
+  const md = openuiMarkdown('<openui title="Paths">Card("Bhakti", "The path of love", "Devotion and surrender.", "Heart")</openui>');
+  assert.equal(md, "### Paths\n\n**Bhakti**\n\n*The path of love*\n\nDevotion and surrender.\n\n*Heart*");
+});
+
+test("an openui stat display becomes a Markdown list", async () => {
+  const { openuiMarkdown } = await import("../src/render.js");
+  assert.equal(openuiMarkdown('<openui>StatDisplay({label: "Age", value: "42", unit: "yrs"})</openui>'), "- Age: **42** yrs");
+});
+
+test("markdownOf replaces every card and leaves the prose", async () => {
+  const { markdownOf } = await import("../src/render.js");
+  assert.equal(markdownOf('before\n\n<openui>Card("C", "body text")</openui>\n\nafter'), "before\n\n**C**\n\nbody text\n\nafter");
+});
+
+
+test("a card's short fields are Markdown text; its body keeps its indentation", async () => {
+  const { openuiMarkdown } = await import("../src/render.js");
+  const md = openuiMarkdown('<openui title="A \\"quoted\\" *title*">Card("Bold * star\\\\", "    code line\\nnext", "Tag_x")</openui>');
+  assert.equal(md, '### A "quoted" \\*title\\*\n\n**Bold \\* star\\\\**\n\n    code line\nnext\n\n*Tag\\_x*');
+});
+
+test("escapes in a card's strings are read in one pass", async () => {
+  const { markdownOf } = await import("../src/render.js");
+  assert.equal(markdownOf('<openui>Card("Path", "C:\\\\new and \\u00e9")</openui>'), "**Path**\n\nC:\\new and \u00e9");
+});

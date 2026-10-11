@@ -297,3 +297,70 @@ test("shown excludes a tail that was buffered but never printed", () => {
   assert.doesNotMatch(h.stdout(), /a tail/, "premise: the tail was not printed");
   assert.equal(h.sr.shown(), "first paragraph\n\n");
 });
+
+// --- --markdown --------------------------------------------------------------
+
+test("the Markdown stream writes prose at once and a card once it closes", async () => {
+  const { createMarkdownStream } = await import("../src/stream.js");
+  let out = "";
+  const sr = createMarkdownStream((s) => (out += s));
+  sr.push("Dharma is <op");
+  assert.equal(out, "Dharma is ", "a '<' that may open a card is held");
+  sr.push('enui>Card("Duty", "One');
+  assert.equal(out, "Dharma is ", "a card is held until it closes");
+  sr.push(' body")</openui> and more');
+  assert.equal(out, "Dharma is **Duty**\n\nOne body and more");
+  sr.finish('Dharma is <openui>Card("Duty", "One body")</openui> and more.');
+  assert.equal(out, "Dharma is **Duty**\n\nOne body and more.\n");
+  assert.equal(sr.shown(), 'Dharma is <openui>Card("Duty", "One body")</openui> and more.', "shown is the answer as sent");
+});
+
+test("a '<' that opens no card is written once it is known not to", async () => {
+  const { createMarkdownStream } = await import("../src/stream.js");
+  let out = "";
+  const sr = createMarkdownStream((s) => (out += s));
+  sr.push("a <");
+  sr.push("b> c");
+  assert.equal(out, "a <b> c");
+});
+
+test("a card that never closed is written as one at the end", async () => {
+  const { createMarkdownStream } = await import("../src/stream.js");
+  let out = "";
+  const sr = createMarkdownStream((s) => (out += s));
+  sr.push('Intro. <openui>Card("Cut", "short');
+  sr.finish('Intro. <openui>Card("Cut", "short');
+  // Closed as it would have been, its last words kept (Cursor 2026-10-11).
+  assert.equal(out, "Intro. **Cut**\n\nshort\n");
+});
+
+
+// From review (Cursor gpt-5.6-sol-high, 2026-10-11).
+
+test("an answer cut short inside a card still hands the reader what arrived", async () => {
+  const { createMarkdownStream } = await import("../src/stream.js");
+  let out = "";
+  const sr = createMarkdownStream((s) => (out += s)) as ReturnType<typeof createMarkdownStream> & { release(): void };
+  sr.push('<openui>Card("Duty", "One body');
+  assert.equal(out, "", "held while the card is open");
+  sr.release();
+  assert.equal(out, "**Duty**\n\nOne body");
+  assert.equal(sr.shown(), '<openui>Card("Duty", "One body', "and the transcript keeps it");
+});
+
+test("text that only looks like a card's opening is text", async () => {
+  const { createMarkdownStream } = await import("../src/stream.js");
+  let out = "";
+  const sr = createMarkdownStream((s) => (out += s));
+  sr.push("use <openuiX here");
+  sr.finish("use <openuiX here");
+  assert.equal(out, "use <openuiX here\n");
+});
+
+test("a closing tag inside a card's string does not close the card", async () => {
+  const { createMarkdownStream } = await import("../src/stream.js");
+  let out = "";
+  const sr = createMarkdownStream((s) => (out += s));
+  sr.push('<openui>Card("T", "say </openui> literally")</openui> after');
+  assert.equal(out, "**T**\n\nsay </openui> literally after");
+});

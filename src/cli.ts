@@ -19,7 +19,7 @@ import { parseArgs, UsageError, type Opts } from "./args.js";
 import { CACHE, DIR_MODE, DLOG, DPID, FILE_MODE, SESS_DIR, SOCK, STATE_FILE } from "./paths.js";
 import { ESC, T, bold, cols, dim, promptMark, setPlain } from "./theme.js";
 import { render, turnRule } from "./render.js";
-import { createStreamRender } from "./stream.js";
+import { createMarkdownStream, createStreamRender } from "./stream.js";
 import { buildMessage, extractAtFiles } from "./protocol.js";
 import {
   exportSessionMarkdown,
@@ -101,6 +101,7 @@ function spinner(label = "thinking") {
  */
 /** Wires the progressive renderer to this invocation's flags and streams. */
 function streamRender(label?: string) {
+  if (OPTS.markdown) return createMarkdownStream();
   return createStreamRender({
     label,
     json: OPTS.json,
@@ -252,8 +253,14 @@ export async function askAndRecord(
     // it was cut short, and recording it as such is the only way the screen and
     // the transcript agree about what happened; dropping it left text on screen
     // that /history and an export both denied ever existed.
+    // In --markdown, what the stream still held (a card not yet closed) goes
+    // out first, so the fragment the reader keeps is all that arrived
+    // (Cursor 2026-10-11); then it ends with a newline.
+    const held = sr as { release?: () => void };
+    if (OPTS.markdown) held.release?.();
     const shown = sr.shown().trim();
     if (!shown) throw e;
+    if (OPTS.markdown && !sr.shown().endsWith("\n")) say("\n");
     let turn: number | undefined;
     if (session) {
       const saved = updateSession(session.name, (s) => {
@@ -271,6 +278,9 @@ export async function askAndRecord(
 
 async function runOnce(): Promise<void> {
   const question = OPTS.question || (await readStdin());
+  // Machine output is the answer or nothing: a caller reading --json or
+  // --markdown must not get the help page as an answer.
+  if (!question && (OPTS.json || OPTS.markdown)) throw new UsageError("no question: give one, or pipe it in");
   if (!question) {
     printHelp();
     process.exit(2);
@@ -643,6 +653,7 @@ const FLAGS = [
   "--list",
   "--raw",
   "--json",
+  "--markdown",
   "--quiet",
   "--help",
   "--version",
@@ -726,6 +737,8 @@ ${b("Options")}
       --list              list saved sessions
       --raw               plain text, no color or markdown styling
       --json              print one JSON object instead of a rendered answer
+      --markdown          the answer as raw Markdown, written as it arrives,
+                          its cards as Markdown too
   -q, --quiet             no spinner or progress ticker
   -h, --help              show this help
   -V, --version           show the version
@@ -871,6 +884,9 @@ export async function main(argv = process.argv): Promise<void> {
   // answer, so the combination would show a prompt and nothing else.
   if (interactive && OPTS.json)
     throw new UsageError("--json is for one-shot questions, not the interactive REPL");
+  if (interactive && OPTS.markdown)
+    throw new UsageError("--markdown is for one-shot questions, not the interactive REPL");
+  if (OPTS.json && OPTS.markdown) throw new UsageError("--json and --markdown are two ways to print one answer: pick one");
   if (interactive) await runInteractive();
   else await runOnce();
 }

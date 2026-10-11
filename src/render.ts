@@ -252,13 +252,18 @@ export function renderMarkdown(md: string): string {
 
 // --- openui ----------------------------------------------------------------
 
+// One pass, so an escaped backslash before an n stays a backslash and an n
+// ("C:\\new" is C:\new, not C: and a new line); \uXXXX too.
 const unescapeStr = (s: string) =>
-  s.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  s.replace(/\\(u[0-9a-fA-F]{4}|[\s\S])/g, (_, c: string) =>
+    c.length === 5 ? String.fromCharCode(parseInt(c.slice(1), 16)) : c === "n" ? "\n" : c === "t" ? "\t" : c === "r" ? "" : c,
+  );
 
 const extractStrings = (s: string) =>
   [...s.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => unescapeStr(m[1]));
 
-function renderCard(args: string[]): string {
+/** A card's strings read as its parts: a title, perhaps a subtitle, a body, perhaps a short tag. */
+function cardParts(args: string[]): { title: string; subtitle: string; body: string; tag: string } {
   const parts = args.filter((a) => !/^https?:\/\/\S+$/i.test(a.trim()));
   const title = parts[0] ?? "";
   const rest = parts.slice(1);
@@ -268,7 +273,11 @@ function renderCard(args: string[]): string {
   if (rest.length >= 2 && isShort(rest[rest.length - 1])) tag = rest.pop()!;
   let subtitle = "";
   if (rest.length >= 2) subtitle = rest.shift()!;
-  const body = rest.join("\n\n");
+  return { title, subtitle, body: rest.join("\n\n"), tag };
+}
+
+function renderCard(args: string[]): string {
+  const { title, subtitle, body, tag } = cardParts(args);
 
   const bar = T.accent("▌ ");
   const barE = T.accent("▌");
@@ -285,14 +294,18 @@ function renderCard(args: string[]): string {
   return lines.join("\n");
 }
 
-function renderStats(block: string): string | null {
-  const rows = [...block.matchAll(/\{([^{}]*)\}/g)]
+function statRows(block: string): { label: string; value: string; unit: string }[] {
+  return [...block.matchAll(/\{([^{}]*)\}/g)]
     .map((m) => {
       const field = (k: string) =>
         unescapeStr(m[1].match(new RegExp(k + '\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"'))?.[1] ?? "");
       return { label: field("label"), value: field("value"), unit: field("unit") };
     })
     .filter((r) => r.label || r.value);
+}
+
+function renderStats(block: string): string | null {
+  const rows = statRows(block);
   if (!rows.length) return null;
   const w = maxOf(rows.map((r) => r.label.length));
   return rows
@@ -332,6 +345,73 @@ function renderOpenUI(block: string): string {
   const strings = extractStrings(block.replace(/title="[^"]*"/, ""));
   if (strings.length) return heading + strings.map((x) => "  " + inline(x)).join("\n") + "\n";
   return dim(block);
+}
+
+// --- openui as Markdown, for --markdown ------------------------------------
+
+const CARD_RE = /Card\(((?:"(?:[^"\\]|\\.)*"|[^()])*)\)/g;
+
+/**
+ * An <openui> block as plain Markdown, for a program that draws Markdown
+ * itself and takes no HTML (a launcher's pane escapes the tag and would show
+ * it as text): its title a heading, each card its title in bold, its
+ * subtitle and tag in italics, its body as it is; a stat display a list.
+ */
+/**
+ * A card's short field as Markdown text: on one line, its marks escaped, so
+ * a title holding "*" or a trailing backslash cannot undo the bold or the
+ * heading it is put in (Cursor 2026-10-11). A card's body is Markdown
+ * already and goes as it is.
+ */
+const mdText = (s: string) =>
+  s.replace(/\s+/g, " ").trim().replace(/[\\`*_[\]<>#|~]/g, (c) => "\\" + c);
+
+/** A body with the blank lines at its ends gone, and nothing else: indentation is Markdown. */
+const bodyOf = (s: string) => s.replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "");
+
+const TITLE_RE = /title="((?:[^"\\]|\\.)*)"/;
+
+export function openuiMarkdown(block: string): string {
+  const raw = block.match(TITLE_RE)?.[1];
+  const title = raw === undefined ? "" : unescapeStr(raw);
+  const heading = title ? `### ${mdText(title)}\n\n` : "";
+  if (/\bCard\s*\(/.test(block)) {
+    const cards: string[] = [];
+    for (const m of block.matchAll(CARD_RE)) {
+      const args = extractStrings(m[1]);
+      if (!args.length) continue;
+      const { title: t, subtitle, body, tag } = cardParts(args);
+      cards.push([`**${mdText(t)}**`, subtitle && `*${mdText(subtitle)}*`, bodyOf(body), tag && `*${mdText(tag)}*`].filter(Boolean).join("\n\n"));
+    }
+    if (cards.length) return heading + cards.join("\n\n");
+  }
+  if (/\bStatDisplay\s*\(/.test(block)) {
+    const rows = statRows(block);
+    if (rows.length)
+      return heading + rows.map((r) => `- ${mdText(r.label)}: **${mdText(r.value)}**${r.unit ? " " + mdText(r.unit) : ""}`).join("\n");
+  }
+  const strings = extractStrings(block.replace(TITLE_RE, ""));
+  return (heading + strings.join("\n\n")).trim();
+}
+
+/**
+ * A card cut off before it closed, as one that did: an unclosed string
+ * closed, then the call and the block, so its last words are kept rather
+ * than dropped with the quote they lack (Cursor 2026-10-11).
+ */
+export function closeCard(text: string): string {
+  let quotes = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === '"') quotes++;
+  }
+  const open = (text.match(/\(/g) ?? []).length - (text.match(/\)/g) ?? []).length;
+  return text + (quotes % 2 ? '"' : "") + ")".repeat(Math.max(0, open)) + "</openui>";
+}
+
+/** The answer as Markdown: each <openui> block replaced by openuiMarkdown(). */
+export function markdownOf(text: string): string {
+  return text.replace(/<openui\b[^>]*>[\s\S]*?<\/openui>/g, (b) => openuiMarkdown(b));
 }
 
 export function render(text: string): string {
